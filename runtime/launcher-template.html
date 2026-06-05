@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AAA Course Launcher</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    #course-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+    #error-screen {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #fff;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #333;
+      padding: 40px;
+      text-align: center;
+    }
+    #error-screen h1 { font-size: 24px; margin-bottom: 16px; }
+    #error-screen p { font-size: 16px; color: #666; max-width: 500px; }
+  </style>
+</head>
+<body>
+
+<iframe id="course-frame" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+        referrerpolicy="origin"></iframe>
+
+<div id="error-screen">
+  <h1>Unable to Load Course</h1>
+  <p>The course content could not be loaded. Please close this window and try again.
+     If the problem persists, contact your training administrator.</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ===================================================================
+  // CONFIGURATION
+  // ===================================================================
+
+  var CONTENT_BASE_URL = '{{CONTENT_BASE_URL}}';
+  var COURSE_ID        = '{{COURSE_ID}}';
+  var NETWORK_ID       = '{{NETWORK_ID}}';
+  var CONTENT_VERSION  = '{{CONTENT_VERSION}}';
+  var ALLOWED_ORIGIN   = '{{ALLOWED_ORIGIN}}';
+  var DIRECT_CONTENT_URL = '{{CONTENT_URL}}';
+
+  var contentUrl = DIRECT_CONTENT_URL || (CONTENT_BASE_URL + '/courses/' + NETWORK_ID + '/' + COURSE_ID
+                 + '/v' + CONTENT_VERSION + '/index.html');
+
+  // ===================================================================
+  // FLIGHT RECORDER — structured logging for SCORM diagnostics
+  // ===================================================================
+
+  var flightLog = [];
+  var FLIGHT_LOG_MAX = 500;
+  var commitFailCount = 0;
+
+  function logEvent(category, action, detail) {
+    var entry = {
+      ts: new Date().toISOString(),
+      cat: category,
+      act: action,
+      ok: true
+    };
+    if (detail !== undefined) entry.detail = detail;
+    if (flightLog.length >= FLIGHT_LOG_MAX) flightLog.shift();
+    flightLog.push(entry);
+    return entry;
+  }
+
+  function logError(category, action, detail) {
+    var entry = logEvent(category, action, detail);
+    entry.ok = false;
+    return entry;
+  }
+
+  // Expose to content iframe via postMessage (action: 'getFlightLog')
+  // and to console for live debugging
+  window.__aaaFlightLog = flightLog;
+
+  // ===================================================================
+  // SCORM 2004 RUNTIME
+  // ===================================================================
+
+  var API = null;
+  var scormInitialized = false;
+  var sessionStartTime = new Date();
+  var commitInterval = null;
+  var COMMIT_INTERVAL_MS = 60000; // Auto-commit every 60 seconds
+
+  /**
+   * Walk the window hierarchy looking for API_1484_11 (SCORM 2004).
+   * Checks parent chain first, then opener chain.
+   * Limit to 10 levels to avoid infinite loops.
+   */
+  function findAPI(win) {
+    var attempts = 0;
+    while (win && attempts < 10) {
+      if (win.API_1484_11) return win.API_1484_11;
+      if (win.parent && win.parent !== win) {
+        win = win.parent;
+      } else {
+        break;
+      }
+      attempts++;
+    }
+    return null;
+  }
+
+  function discoverAPI() {
+    var api = findAPI(window);
+    if (!api && window.opener) {
+      api = findAPI(window.opener);
+    }
+    return api;
+  }
+
+  function scormInit() {
+    API = discoverAPI();
+    if (!API) {
+      logError('scorm', 'discover', 'API_1484_11 not found');
+      console.warn('[AAA Launcher] API_1484_11 not found. Running without LMS.');
+      return false;
+    }
+    logEvent('scorm', 'discover', 'API_1484_11 found');
+
+    var result = API.Initialize('');
+    if (result !== 'true') {
+      var err = API.GetLastError();
+      var msg = 'Error ' + err + ': ' + API.GetErrorString(err);
+      logError('scorm', 'Initialize', msg);
+      console.error('[AAA Launcher] Initialize failed. ' + msg);
+      return false;
+    }
+    logEvent('scorm', 'Initialize', 'ok');
+
+    scormInitialized = true;
+    sessionStartTime = new Date();
+
+    // Set initial completion status to "incomplete" if this is a new attempt
+    var completionStatus = API.GetValue('cmi.completion_status');
+    logEvent('scorm', 'GetValue', { key: 'cmi.completion_status', value: completionStatus });
+    if (completionStatus === 'not attempted' || completionStatus === 'unknown' || completionStatus === '') {
+      API.SetValue('cmi.completion_status', 'incomplete');
+      logEvent('scorm', 'SetValue', { key: 'cmi.completion_status', value: 'incomplete' });
+    }
+
+    var commitResult = API.Commit('');
+    if (commitResult !== 'true') {
+      logError('scorm', 'Commit', 'init commit failed: ' + commitResult);
+    } else {
+      logEvent('scorm', 'Commit', 'init');
+    }
+
+    // Start periodic commit timer
+    commitInterval = setInterval(function () {
+      if (scormInitialized) {
+        updateSessionTime();
+        var autoResult = API.Commit('');
+        if (autoResult !== 'true') {
+          commitFailCount++;
+          logError('scorm', 'Commit', 'auto-commit #' + commitFailCount + ' failed');
+        } else {
+          if (commitFailCount > 0) {
+            logEvent('scorm', 'Commit', 'auto-commit recovered after ' + commitFailCount + ' failures');
+            commitFailCount = 0;
+          }
+        }
+      }
+    }, COMMIT_INTERVAL_MS);
+
+    return true;
+  }
+
+  /**
+   * Compute ISO 8601 duration string from session start to now.
+   * Format: PT#H#M#S (e.g., PT1H30M45S)
+   */
+  function getSessionTimeISO() {
+    var elapsed = Math.floor((new Date() - sessionStartTime) / 1000);
+    var hours   = Math.floor(elapsed / 3600);
+    var minutes = Math.floor((elapsed % 3600) / 60);
+    var seconds = elapsed % 60;
+
+    var duration = 'PT';
+    if (hours > 0)   duration += hours + 'H';
+    if (minutes > 0) duration += minutes + 'M';
+    if (seconds > 0 || duration === 'PT') duration += seconds + 'S';
+    return duration;
+  }
+
+  function updateSessionTime() {
+    if (scormInitialized && API) {
+      API.SetValue('cmi.session_time', getSessionTimeISO());
+    }
+  }
+
+  function scormTerminate() {
+    if (!scormInitialized || !API) return;
+
+    clearInterval(commitInterval);
+    updateSessionTime();
+
+    var preCommit = API.Commit('');
+    if (preCommit !== 'true') {
+      logError('scorm', 'Commit', 'pre-terminate commit failed');
+    } else {
+      logEvent('scorm', 'Commit', 'pre-terminate');
+    }
+
+    var result = API.Terminate('');
+    if (result !== 'true') {
+      var err = API.GetLastError();
+      var msg = 'Error ' + err + ': ' + API.GetErrorString(err);
+      logError('scorm', 'Terminate', msg);
+      console.error('[AAA Launcher] Terminate failed. ' + msg);
+    } else {
+      logEvent('scorm', 'Terminate', 'ok');
+    }
+
+    scormInitialized = false;
+  }
+
+  function scormSetValue(key, value) {
+    if (!scormInitialized || !API) {
+      logError('scorm', 'SetValue', { key: key, reason: 'not initialized' });
+      return '';
+    }
+    var result = API.SetValue(key, String(value));
+    if (result !== 'true') {
+      var err = API.GetLastError();
+      var msg = 'Error ' + err + ': ' + API.GetErrorString(err) + ' | ' + API.GetDiagnostic(err);
+      logError('scorm', 'SetValue', { key: key, value: String(value).substring(0, 200), error: msg });
+      console.warn('[AAA Launcher] SetValue(' + key + ') failed. ' + msg);
+    }
+    return result;
+  }
+
+  function scormGetValue(key) {
+    if (!scormInitialized || !API) {
+      logError('scorm', 'GetValue', { key: key, reason: 'not initialized' });
+      return '';
+    }
+    var value = API.GetValue(key);
+    var err = API.GetLastError();
+    if (err !== '0') {
+      logError('scorm', 'GetValue', { key: key, error: err + ': ' + API.GetErrorString(err) });
+      console.warn('[AAA Launcher] GetValue(' + key + ') error ' + err + ': '
+                   + API.GetErrorString(err));
+    }
+    return value;
+  }
+
+  function scormCommit() {
+    if (!scormInitialized || !API) return;
+    var result = API.Commit('');
+    if (result !== 'true') {
+      commitFailCount++;
+      logError('scorm', 'Commit', 'explicit commit failed (#' + commitFailCount + ')');
+    }
+  }
+
+  function normalizeInteractionValue(value) {
+    if (value === undefined || value === null) return '';
+    if (Array.isArray(value)) return value.join('[,]');
+    return String(value);
+  }
+
+  function scormSetInteraction(payload) {
+    payload = payload || {};
+    var count = parseInt(scormGetValue('cmi.interactions._count'), 10);
+    var index = isNaN(count) || count < 0 ? 0 : count;
+    var prefix = 'cmi.interactions.' + index;
+
+    scormSetValue(prefix + '.id', payload.id);
+    scormSetValue(prefix + '.type', payload.type || 'choice');
+
+    var timestamp = payload.timestamp || payload.submittedAt;
+    if (timestamp !== undefined && timestamp !== null && timestamp !== '') {
+      scormSetValue(prefix + '.timestamp', timestamp);
+    }
+    if (payload.description !== undefined && payload.description !== null && payload.description !== '') {
+      scormSetValue(prefix + '.description', payload.description);
+    }
+
+    var learnerResponse = payload.learnerResponse;
+    if (learnerResponse === undefined) learnerResponse = payload.learner_response;
+    if (learnerResponse !== undefined && learnerResponse !== null) {
+      scormSetValue(prefix + '.learner_response', normalizeInteractionValue(learnerResponse));
+    }
+
+    var correctResponses = payload.correctResponses;
+    if (correctResponses === undefined) correctResponses = payload.correctResponse;
+    if (correctResponses === undefined) correctResponses = payload.correct_response;
+    if (correctResponses !== undefined && correctResponses !== null) {
+      if (!Array.isArray(correctResponses)) {
+        correctResponses = [correctResponses];
+      }
+      correctResponses.forEach(function (response, responseIndex) {
+        if (response !== undefined && response !== null && response !== '') {
+          scormSetValue(
+            prefix + '.correct_responses.' + responseIndex + '.pattern',
+            normalizeInteractionValue(response)
+          );
+        }
+      });
+    }
+
+    if (payload.result !== undefined && payload.result !== null && payload.result !== '') {
+      scormSetValue(prefix + '.result', payload.result);
+    }
+    if (payload.latency !== undefined && payload.latency !== null && payload.latency !== '') {
+      scormSetValue(prefix + '.latency', payload.latency);
+    }
+    if (payload.weighting !== undefined && payload.weighting !== null && payload.weighting !== '') {
+      scormSetValue(prefix + '.weighting', payload.weighting);
+    }
+
+    scormCommit();
+    return index;
+  }
+
+  // ===================================================================
+  // POSTMESSAGE BRIDGE
+  // ===================================================================
+
+  /**
+   * All messages from the content iframe must match this schema:
+   * {
+   *   type: "aaa-scorm",
+   *   id: "<unique-request-id>",
+   *   action: "<action-name>",
+   *   payload: { ... }
+   * }
+   *
+   * Responses sent back to the iframe:
+   * {
+   *   type: "aaa-scorm-response",
+   *   id: "<matching-request-id>",
+   *   success: true|false,
+   *   payload: { ... }
+   * }
+   */
+
+  var pendingHandshake = false;
+
+  function handleMessage(event) {
+    // Origin validation
+    if (event.origin !== ALLOWED_ORIGIN) {
+      return;
+    }
+
+    var msg = event.data;
+    if (!msg || msg.type !== 'aaa-scorm' || !msg.id || !msg.action) {
+      return;
+    }
+
+    var response = {
+      type: 'aaa-scorm-response',
+      id: msg.id,
+      success: true,
+      payload: {}
+    };
+
+    try {
+      switch (msg.action) {
+
+        case 'handshake':
+          // Content iframe announces it is ready.
+          // Return initial session state so content can resume.
+          pendingHandshake = true;
+          var entry = scormGetValue('cmi.entry');
+          response.payload = {
+            connected: scormInitialized,
+            entry: entry,
+            completionStatus: scormGetValue('cmi.completion_status'),
+            successStatus: scormGetValue('cmi.success_status'),
+            location: scormGetValue('cmi.location'),
+            suspendData: scormGetValue('cmi.suspend_data'),
+            scoreScaled: scormGetValue('cmi.score.scaled'),
+            scoreRaw: scormGetValue('cmi.score.raw'),
+            learnerName: scormGetValue('cmi.learner_name'),
+            learnerId: scormGetValue('cmi.learner_id')
+          };
+          break;
+
+        case 'setState':
+          // Generic key-value setter for any SCORM data model element.
+          // payload: { key: "cmi.xxx", value: "..." }
+          var setResult = scormSetValue(msg.payload.key, msg.payload.value);
+          response.payload = { result: setResult };
+          break;
+
+        case 'getState':
+          // Generic key-value getter.
+          // payload: { key: "cmi.xxx" }
+          response.payload = { value: scormGetValue(msg.payload.key) };
+          break;
+
+        case 'setCompletionStatus':
+          // payload: { status: "completed"|"incomplete"|"not attempted"|"unknown" }
+          scormSetValue('cmi.completion_status', msg.payload.status);
+          scormCommit();
+          break;
+
+        case 'setSuccessStatus':
+          // payload: { status: "passed"|"failed"|"unknown" }
+          scormSetValue('cmi.success_status', msg.payload.status);
+          scormCommit();
+          break;
+
+        case 'setScore':
+          // payload: { scaled: 0.0-1.0, raw: 0-100, min: 0, max: 100 }
+          if (msg.payload.scaled !== undefined) {
+            scormSetValue('cmi.score.scaled', String(msg.payload.scaled));
+          }
+          if (msg.payload.raw !== undefined) {
+            scormSetValue('cmi.score.raw', String(msg.payload.raw));
+          }
+          if (msg.payload.min !== undefined) {
+            scormSetValue('cmi.score.min', String(msg.payload.min));
+          }
+          if (msg.payload.max !== undefined) {
+            scormSetValue('cmi.score.max', String(msg.payload.max));
+          }
+          scormCommit();
+          break;
+
+        case 'setLocation':
+          // payload: { location: "page-index-or-bookmark-string" }
+          scormSetValue('cmi.location', msg.payload.location);
+          scormCommit();
+          break;
+
+        case 'setInteraction':
+          // payload: { id, type, learnerResponse, correctResponses, result,
+          //            latency, timestamp/submittedAt, description }
+          response.payload = { index: scormSetInteraction(msg.payload) };
+          break;
+
+        case 'setSuspendData':
+          // payload: { data: "<JSON string, max 64KB>" }
+          scormSetValue('cmi.suspend_data', msg.payload.data);
+          scormCommit();
+          break;
+
+        case 'getSuspendData':
+          response.payload = { data: scormGetValue('cmi.suspend_data') };
+          break;
+
+        case 'commit':
+          updateSessionTime();
+          scormCommit();
+          break;
+
+        case 'navigate':
+          // payload: { request: "exitAll"|"suspendAll"|"_none_" }
+          // Used for explicit navigation requests to the LMS.
+          if (msg.payload.request === 'exitAll' || msg.payload.request === 'suspendAll') {
+            scormSetValue('adl.nav.request', msg.payload.request);
+            scormCommit();
+          }
+          break;
+
+        case 'examSubmit':
+          // Set score + success status only. Completion is handled by the player's
+          // checkCompletion() based on all conditions (timer, pages, quiz).
+          // payload: { scaled: 0.0-1.0, raw: 0-100, min: 0, max: 100,
+          //            passed: true|false }
+          scormSetValue('cmi.score.scaled', String(msg.payload.scaled));
+          scormSetValue('cmi.score.raw', String(msg.payload.raw));
+          scormSetValue('cmi.score.min', String(msg.payload.min || 0));
+          scormSetValue('cmi.score.max', String(msg.payload.max || 100));
+          scormSetValue('cmi.success_status', msg.payload.passed ? 'passed' : 'failed');
+          updateSessionTime();
+          scormCommit();
+          break;
+
+        case 'terminate':
+          scormTerminate();
+          break;
+
+        case 'getFlightLog':
+          response.payload = { log: flightLog.slice() };
+          break;
+
+        default:
+          response.success = false;
+          response.payload = { error: 'Unknown action: ' + msg.action };
+      }
+
+      // Log bridge actions (skip high-frequency getFlightLog to avoid noise)
+      if (msg.action !== 'getFlightLog') {
+        logEvent('bridge', msg.action, response.success ? 'ok' : response.payload);
+      }
+    } catch (e) {
+      response.success = false;
+      response.payload = { error: e.message };
+    }
+
+    // Send response back to the content iframe
+    event.source.postMessage(response, event.origin);
+  }
+
+  window.addEventListener('message', handleMessage, false);
+
+  // ===================================================================
+  // LIFECYCLE
+  // ===================================================================
+
+  // Initialize SCORM
+  scormInit();
+
+  // Load the content iframe
+  var frame = document.getElementById('course-frame');
+
+  frame.addEventListener('load', function () {
+    logEvent('lifecycle', 'iframe-load', pendingHandshake ? 'handshake-received' : 'waiting-for-handshake');
+    // If content fails to load, the load event fires on about:blank or error page.
+    // We rely on the handshake timeout to detect failures.
+    if (!pendingHandshake) {
+      setTimeout(function () {
+        if (!pendingHandshake) {
+          logError('lifecycle', 'handshake-timeout', 'Content did not handshake within 10s');
+          console.warn('[AAA Launcher] Content did not handshake within 10s.');
+          document.getElementById('error-screen').style.display = 'flex';
+          frame.style.display = 'none';
+        }
+      }, 10000);
+    }
+  });
+
+  logEvent('lifecycle', 'content-load', { url: contentUrl.substring(0, 120) });
+  frame.src = contentUrl;
+
+  // Handle window close / navigate away
+  window.addEventListener('beforeunload', function () {
+    logEvent('lifecycle', 'beforeunload');
+    scormTerminate();
+  });
+
+  // Also handle pagehide for mobile Safari
+  window.addEventListener('pagehide', function () {
+    logEvent('lifecycle', 'pagehide');
+    scormTerminate();
+  });
+
+})();
+</script>
+</body>
+</html>

@@ -30,7 +30,7 @@ function generateLauncher({ courseId, networkId, contentVersion, contentBaseUrl,
   const urlObj = new URL(originSource);
   const allowedOrigin = urlObj.origin;
 
-  const templatePath = path.join(__dirname, '..', '..', '..', '..', 'packages', 'course-player', 'src', 'launcher-template.html');
+  const templatePath = path.join(__dirname, '..', '..', 'runtime', 'launcher-template.html');
   // Normalize CRLF→LF to match template literal behavior (JS spec normalizes CRLF in template literals)
   let html = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
 

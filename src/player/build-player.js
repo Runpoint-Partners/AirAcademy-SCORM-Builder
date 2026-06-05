@@ -306,8 +306,8 @@ function generateIndexHtml(courseData, options) {
     return generateSharedPlayerHtml(courseData, courseDataJson);
   }
 
-  // Read runtime assets from packages/course-player/src/
-  const runtimeDir = path.join(__dirname, '..', '..', '..', '..', 'packages', 'course-player', 'src');
+  // Read the vendored runtime player assets (synced from course-player — see runtime/PROVENANCE.md).
+  const runtimeDir = path.join(__dirname, '..', '..', 'runtime');
   // Normalize CRLF→LF for files extracted from template literals (JS spec normalizes CRLF in template literals).
   // scorm-client.js keeps its original line endings since it was always read from disk.
   const readLF = (filePath) => fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
@@ -675,7 +675,7 @@ async function buildPlayer(options) {
   fs.writeFileSync(outputPath, indexHtml, 'utf8');
 
   // Copy scorm-client.js alongside index.html for local preview
-  const scormClientSrc = path.join(__dirname, '..', '..', '..', '..', 'packages', 'course-player', 'src', 'scorm-client.js');
+  const scormClientSrc = path.join(__dirname, '..', '..', 'runtime', 'scorm-client.js');
   const scormClientDest = path.join(outputDir, 'scorm-client.js');
   fs.copyFileSync(scormClientSrc, scormClientDest);
 
