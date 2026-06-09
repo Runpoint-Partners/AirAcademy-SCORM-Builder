@@ -35,6 +35,21 @@ require('dotenv').config();
 
 const ASCENT_BASE = 'https://ascent.aerostudies.com';
 
+// Hosts to try when fetching hash-based /files/ assets. The platform host migrated
+// ascent.aerostudies.com -> aircrewacademy.aerostudies.com (2026-05-28); the hash-file fetch
+// must try BOTH (the legacy host now 403s/redirects to login), plus ASCENT_URL if config names a
+// newer one. Mirrors the VIMEO_EMBED_REFERERS multi-host precedent above. Adding a future host =
+// one array entry.
+const HASH_FILE_HOSTS = Array.from(new Set(
+  [
+    'https://aircrewacademy.aerostudies.com',
+    ASCENT_BASE,
+    process.env.ASCENT_URL,
+  ]
+    .filter((h) => typeof h === 'string' && h.length > 0)
+    .map((h) => h.replace(/\/+$/, '')),
+));
+
 // Hosts a Vimeo video may be EMBEDDED on. Vimeo's embed whitelist checks the
 // Referer against the embedding domain, so a video with NO unlock hash 403s unless
 // the Referer matches (OP-580: vimeo_386784430). The platform host migrated
@@ -311,6 +326,26 @@ async function loginToAscent(username, password) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the ordered, deduped list of absolute URLs to try when fetching a hash/reference
+ * file. Tries each known host (the platform migrated hosts — see HASH_FILE_HOSTS), plus the
+ * reference_library fallback for bare filenames. PURE (no I/O) so it is unit-testable.
+ *
+ * @param {string} url      Source ref — relative "/files/211-<hash>" or absolute "http...".
+ * @param {string[]} hosts  Hosts to prefix relative refs with.
+ * @returns {string[]} Absolute URLs to try, in order.
+ */
+function hashFileCandidateUrls(url, hosts = HASH_FILE_HOSTS) {
+  if (typeof url === 'string' && url.startsWith('http')) return [url];
+  const out = [];
+  for (const host of hosts) out.push(`${host}${url}`);
+  // Bare filename (reference_file) fallback: the actual files live under reference_library/90.
+  if (!url.startsWith('/files/') && /\.\w{2,4}$/.test(url)) {
+    for (const host of hosts) out.push(`${host}/files/reference_library/90${url}`);
+  }
+  return [...new Set(out)];
+}
+
+/**
  * Download a hash-based file from Ascent using authenticated cookies.
  *
  * Hash files at /files/{networkId}-{hexhash} return 403 without auth.
@@ -333,18 +368,10 @@ async function downloadHashFile(url, cookies) {
     throw new Error(`Cannot download hash file without Ascent cookies: ${url}`);
   }
 
-  // Build list of URLs to try. For bare filenames (reference_file paths like
-  // "/AC_120_91A.pdf"), Ascent redirects to the login page. The actual files
-  // live under /files/reference_library/90/<filename>.
-  const urlsToTry = [];
-  const fullUrl = url.startsWith('http') ? url : `${ASCENT_BASE}${url}`;
-  urlsToTry.push(fullUrl);
-
-  // If the path looks like a bare filename (starts with / and has an extension),
-  // also try the reference_library path
-  if (!url.startsWith('http') && !url.startsWith('/files/') && url.match(/\.\w{2,4}$/)) {
-    urlsToTry.push(`${ASCENT_BASE}/files/reference_library/90${url}`);
-  }
+  // Build the candidate URLs to try: each known host + the reference_library fallback for
+  // bare filenames (Ascent redirects bare names to login; the files live under
+  // /files/reference_library/90/<filename>). See hashFileCandidateUrls / HASH_FILE_HOSTS.
+  const urlsToTry = hashFileCandidateUrls(url);
 
   let lastError = null;
 
@@ -879,7 +906,13 @@ function findHashFileUrls(html) {
  * @param {string} opts.ascentCookies
  * @returns {Promise<{ html: string, entries: Array }>}
  */
-async function resolveHashFiles(html, { networkId, courseId, version, ascentCookies }) {
+async function resolveHashFiles(html, opts = {}) {
+  const { networkId, courseId, version, ascentCookies } = opts;
+  // I/O ports — default to the real impls; injectable so unit tests run hermetically
+  // (no network/S3). Production callers pass neither and get the real functions.
+  const download = opts.downloadHashFile || downloadHashFile;
+  const uploadMedia = opts.uploadMedia || uploadMediaToS3;
+
   const hashUrls = findHashFileUrls(html);
   if (hashUrls.length === 0) return { html, entries: [] };
 
@@ -899,15 +932,15 @@ async function resolveHashFiles(html, { networkId, courseId, version, ascentCook
         throw new Error('No Ascent cookies provided — cannot download authenticated files');
       }
 
-      // Download from Ascent
-      const { buffer, contentType, extension } = await downloadHashFile(relativePath, ascentCookies);
+      // Download from Ascent (via the injectable port)
+      const { buffer, contentType, extension } = await download(relativePath, ascentCookies);
 
       // Derive filename: use the hash portion with the detected extension
       const hashFilename = relativePath.split('/').pop();
       const s3Key = `${S3_CONTENT_PREFIX}/${networkId}/${courseId}/v${version}/media/${hashFilename}${extension}`;
 
-      // Upload to S3 (idempotent)
-      const presignedUrl = await uploadMediaToS3({ buffer, key: s3Key, contentType });
+      // Upload to S3 (idempotent, via the injectable port)
+      const presignedUrl = await uploadMedia({ buffer, key: s3Key, contentType });
 
       entry.resolved = presignedUrl;
       entry.s3Key = s3Key;
@@ -925,22 +958,32 @@ async function resolveHashFiles(html, { networkId, courseId, version, ascentCook
   // Execute with concurrency limit
   const results = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
-  // Rewrite HTML for each successfully resolved hash file
+  // Rewrite HTML per entry.
   for (const entry of results) {
     entries.push(entry);
 
-    if (entry.status !== 'resolved' || !entry.resolved) continue;
-
-    // Escape the original path for use in regex (it contains hyphens, slashes, etc.)
     const escaped = escapeRegex(entry.original);
 
-    // Replace both relative and absolute forms in src and href attributes.
-    // This handles: src="/files/668-abc..." and src="https://ascent.aerostudies.com/files/668-abc..."
-    const rewritePattern = new RegExp(
-      `((?:src|href)\\s*=\\s*)(["'])((?:https?://ascent\\.aerostudies\\.com)?${escaped})\\2`,
-      'gi'
-    );
-    html = html.replace(rewritePattern, `$1$2${entry.resolved}$2`);
+    if (entry.status === 'resolved' && entry.resolved) {
+      // Replace both relative and absolute forms in src and href attributes.
+      // Handles: src="/files/668-abc..." and src="https://ascent.aerostudies.com/files/668-abc..."
+      const rewritePattern = new RegExp(
+        `((?:src|href)\\s*=\\s*)(["'])((?:https?://ascent\\.aerostudies\\.com)?${escaped})\\2`,
+        'gi'
+      );
+      html = html.replace(rewritePattern, `$1$2${entry.resolved}$2`);
+      continue;
+    }
+
+    // FAILED: never silently leave a bare ROOT-RELATIVE /files/ ref — it resolves to the S3
+    // bucket root and 403s (an ambiguous failure invisible to every gate). Rewrite to the
+    // absolute Ascent form (deterministic + attributable) and tag the entry so the report
+    // surfaces it. The asset is still broken, but it is now loud, not silent (repo I3/I7).
+    if (typeof entry.original === 'string' && entry.original.startsWith('/files/')) {
+      const bareAttrPattern = new RegExp(`((?:src|href)\\s*=\\s*)(["'])(${escaped})\\2`, 'gi');
+      html = html.replace(bareAttrPattern, `$1$2${ASCENT_BASE}${entry.original}$2`);
+      entry.unresolvedRootRelative = true;
+    }
   }
 
   return { html, entries };
@@ -1818,7 +1861,10 @@ function summarizeUnresolved(reconciledFailed) {
   const unresolvedAscentAssets = list.filter((entry) => {
     const original = String((entry && entry.original) || '');
     if (original.includes('ascent.aerostudies.com')) return true;
+    if (original.includes('aircrewacademy.aerostudies.com')) return true;
     if (original.includes('/content/showVideo/')) return true;
+    // Bare root-relative hash-file ref (/files/{net}-{hash}) — the OP-599 dual-size-image class.
+    if (/^\/files\/\d+-[0-9a-f]{20,}/.test(original)) return true;
     return false;
   });
   return { unresolvedIframes, unresolvedIframeIds, unresolvedAscentAssets };
@@ -1972,6 +2018,9 @@ module.exports = {
   uploadSharedReferenceToS3,
   withSharedAssetLock,
   resolveMedia,
+  resolveHashFiles,
+  findHashFileUrls,
+  hashFileCandidateUrls,
   loginToAscent,
   downloadHashFile,
   cachedDownloadHashFile,

@@ -674,6 +674,42 @@ async function buildPlayer(options) {
   const outputPath = path.join(outputDir, 'index.html');
   fs.writeFileSync(outputPath, indexHtml, 'utf8');
 
+  // Persist a durable build-time artifact: broken media assets + broken/missing pages. The build
+  // COMPLETES regardless (no hard block) — this is the observable record so a failed asset is never
+  // silently dropped (repo I7). Consumed by the deploy gate / the content verifier.
+  const brokenOrMissingPages = courseData.pages
+    .map((p, i) => ({ p: p, i: i }))
+    .filter(function (x) {
+      const p = x.p;
+      if (p.type === 'html') return !p.htmlBody || !String(p.htmlBody).trim();
+      if (p.type === 'selftest') return !p.question || !String(p.question).trim();
+      if (p.type === 'quiz') return !Array.isArray(p.questions) || p.questions.length === 0;
+      return false;
+    })
+    .map(function (x) {
+      return { index: x.i, id: x.p.id, type: x.p.type, title: x.p.title || null };
+    });
+  const mediaReportArtifact = {
+    courseId: String(courseData.courseId),
+    networkId: String(courseData.networkId),
+    resolved: mediaReport.totalResolved,
+    failed: mediaReport.totalFailed,
+    brokenAssets: mediaReport.allFailed.map(function (e) {
+      return {
+        original: e.original || null,
+        action: e.action || null,
+        error: e.error || null,
+        rootRelative: Boolean(e.unresolvedRootRelative),
+      };
+    }),
+    brokenOrMissingPages: brokenOrMissingPages,
+  };
+  fs.writeFileSync(
+    path.join(outputDir, 'media-report.json'),
+    JSON.stringify(mediaReportArtifact, null, 2),
+    'utf8'
+  );
+
   // Copy scorm-client.js alongside index.html for local preview
   const scormClientSrc = path.join(__dirname, '..', '..', 'runtime', 'scorm-client.js');
   const scormClientDest = path.join(outputDir, 'scorm-client.js');
