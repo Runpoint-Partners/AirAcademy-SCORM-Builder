@@ -786,11 +786,8 @@ function renderPage() {
   // Re-encode to %2520 so S3 receives the literal %20.
   fixEncodedMediaUrls();
 
-  // Auto-play first video on the page (matches Ascent behavior)
-  var videos = document.querySelectorAll('#content-inner video');
-  if (videos.length > 0) {
-    videos[0].play().catch(function() { /* autoplay blocked by browser — ignore */ });
-  }
+  // OE-26 (508): do not auto-play video. Videos render with native controls so
+  // the learner starts playback. Auto-play violates Section 508 / WCAG.
 }
 
 function renderSelftest(container, page) {
