@@ -466,16 +466,7 @@
     var self = this;
     return new Promise(function (resolve, reject) {
       var id = self._generateId();
-
-      var timer = setTimeout(function () {
-        self._pending.delete(id);
-        var err = new Error('ScormClient timeout: ' + action + ' (id=' + id + ')');
-        self._fireSendError(action, err);
-        reject(err);
-      }, self._timeout);
-
-      self._pending.set(id, { resolve: resolve, reject: reject, timer: timer, action: action });
-
+      var attempts = 0;
       var msg = {
         type: 'aaa-scorm',
         id: id,
@@ -483,8 +474,26 @@
         payload: payload
       };
 
-      // Post to parent window (the launcher)
-      window.parent.postMessage(msg, self._targetOrigin);
+      // ONE silent retry/grace before a timeout is allowed to declare failure: a single
+      // slow-but-successful launcher response (e.g. cold-start congestion) must not false-trip
+      // the degraded banner. Only the SECOND consecutive timeout fires _fireSendError + rejects.
+      // The id is reused, so a late response to the first attempt still satisfies the retry's
+      // pending entry; SCORM set*/commit are idempotent, so a double-delivered write is safe.
+      function dispatch() {
+        var timer = setTimeout(function () {
+          self._pending.delete(id);
+          attempts++;
+          if (attempts < 2) { dispatch(); return; }
+          var err = new Error('ScormClient timeout: ' + action + ' (id=' + id + ')');
+          self._fireSendError(action, err);
+          reject(err);
+        }, self._timeout);
+        self._pending.set(id, { resolve: resolve, reject: reject, timer: timer, action: action });
+        // Post to parent window (the launcher)
+        window.parent.postMessage(msg, self._targetOrigin);
+      }
+
+      dispatch();
     });
   };
 
@@ -537,15 +546,36 @@
    * (isStandalone() && parent !== self) and trips the warning itself — so a real
    * connect failure is still surfaced; we just don't false-trip top-level previews.
    *
-   * Note: an 'Unknown action' rejection (launcher doesn't support a verb) is NO
-   * longer suppressed. With the launcher and player co-deployed, that signals a
-   * version mismatch — genuinely off the happy path — so it trips the warning.
+   * Note: an 'Unknown action' rejection (launcher predates a verb) is suppressed for ALL
+   * verbs EXCEPT the critical save path (commit / setSuspendData / setCompletionStatus). The
+   * shared player updates on S3 without rebuilding every course, so it routinely runs inside
+   * older per-course launchers; an unsupported NON-save verb is benign version skew, not data
+   * loss, and must not false-trip the learner banner. A failed save verb still surfaces.
    *
    * @param {string} action
    * @param {Error} err
    */
   ScormClient.prototype._fireSendError = function _fireSendError(action, err) {
     if (action === 'handshake') return;
+    // getFlightLog is a DIAGNOSTIC / observability read: the player harvests the launcher's
+    // flight recorder every 15s for telemetry (see aaaHarvestLauncher). Its failure is NEVER
+    // learner data loss. Critically, a per-course launcher deployed BEFORE this verb existed
+    // answers 'Unknown action: getFlightLog' on every flush — which previously false-tripped
+    // the sticky "we can't save your progress" degraded banner on every un-rebuilt course,
+    // even though saves were succeeding. Like a failed telemetry POST (BR-BANNER-GATE), an
+    // observability read must not pop the learner-facing banner. Real save/commit failures
+    // (setSuspendData / commit / setCompletionStatus timeouts or success:false) still trip it.
+    if (action === 'getFlightLog') return;
+    // BENIGN VERSION SKEW (generalized — replaces the old per-verb special-cases for
+    // getFlightLog/setSuccessStatus): an 'Unknown action: <verb>' response means the per-course
+    // launcher was baked BEFORE that verb existed (the shared player updates on S3 without
+    // rebuilding every course). For everything EXCEPT the critical save path that is NOT learner
+    // data loss and must not trip the banner — this kills the whole false-positive CLASS rather
+    // than chasing one verb at a time. The critical save verbs below STILL surface an
+    // Unknown-action failure: if the launcher cannot persist progress, the record is genuinely
+    // at risk and the learner must be told.
+    var isCriticalSave = (action === 'commit' || action === 'setSuspendData' || action === 'setCompletionStatus');
+    if (err && /Unknown action/i.test(err.message) && !isCriticalSave) return;
     if (typeof this._onSendError === 'function') {
       try { this._onSendError(action, err); } catch (e) { /* a warning must never break the bridge */ }
     }

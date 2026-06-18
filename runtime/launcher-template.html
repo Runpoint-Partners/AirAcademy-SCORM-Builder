@@ -157,6 +157,10 @@
       logEvent('scorm', 'SetValue', { key: 'cmi.completion_status', value: 'incomplete' });
     }
 
+    // Mark the attempt resumable from the very first commit (suspend unless this
+    // launch already resumed a completed attempt) so resume survives an abrupt close.
+    setScormExit();
+
     var commitResult = API.Commit('');
     if (commitResult !== 'true') {
       logError('scorm', 'Commit', 'init commit failed: ' + commitResult);
@@ -168,6 +172,7 @@
     commitInterval = setInterval(function () {
       if (scormInitialized) {
         updateSessionTime();
+        setScormExit();
         var autoResult = API.Commit('');
         if (autoResult !== 'true') {
           commitFailCount++;
@@ -207,11 +212,27 @@
     }
   }
 
+  // SCORM 2004: cmi.exit tells the LMS how the attempt ended and — critically —
+  // whether to PRESERVE the runtime data (suspend_data, location) for resume.
+  // We set 'suspend' whenever the course is NOT yet completed, so Docebo retains
+  // the learner's progress and reports cmi.entry='resume' on the next launch; we
+  // set 'normal' once completed (the attempt is finished, no resume needed).
+  // Writing this on init + every commit (not only at Terminate) means even an
+  // ABRUPT close with no Terminate leaves a resumable state on the LMS — the root
+  // of the "re-entered the course and had to start over" failures (OP-588 class).
+  function setScormExit() {
+    if (!scormInitialized || !API) return;
+    var status = API.GetValue('cmi.completion_status');
+    var exit = (status === 'completed') ? 'normal' : 'suspend';
+    API.SetValue('cmi.exit', exit);
+  }
+
   function scormTerminate() {
     if (!scormInitialized || !API) return;
 
     clearInterval(commitInterval);
     updateSessionTime();
+    setScormExit(); // final exit: 'normal' if completed, else 'suspend' (resume preserved)
 
     var preCommit = API.Commit('');
     if (preCommit !== 'true') {
