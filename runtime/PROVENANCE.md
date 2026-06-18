@@ -8,7 +8,7 @@ They are **sourced from `course-player`** (the runtime player's home, in `Runpoi
 and vendored here so the builder is **self-contained** (no filesystem reach into a sibling repo).
 
 - Source: `Runpoint-Partners/AirAcademy` → `packages/course-player/src/`
-- Synced from commit: **`a4deb04`** (2026-06-18)
+- Synced from commit: **`9f3ee79`** (2026-06-18)
 - Files: `player.css`, `player.js`, `scorm-client.js`, `launcher-template.html`
 
 ## Refresh (one command)

@@ -1,3 +1,6 @@
+// Inject copy-protection CSS so course text is non-selectable for learners.
+(function() { if (typeof document !== 'undefined' && document.head) { var s = document.createElement('style'); s.textContent = '#content-area,#sidebar-nav{user-select:none;-webkit-user-select:none}'; document.head.appendChild(s); } })();
+
 // ScormClient instance
 // Any genuine LMS read/write failure (timeout or success:false), across every
 // Docebo endpoint, trips the sticky degraded-mode warning. aaaShowDegraded is a
@@ -575,8 +578,15 @@ function aaaShowSessionExpired() {
 // session cookie). A non-2xx response means the session is expired → loud banner. A network/CORS
 // TypeError means the browser blocked the cross-origin request — logged silently (keepalive not
 // available, but the session isn't necessarily expired yet, so no false-positive banner).
+//
+// SECURITY: only ping while the learner is active (aaaTimerFrozen = false). Pinging on idle
+// tabs would defeat the platform session timeout as a security control — an abandoned open tab
+// would keep the session alive indefinitely, giving physical-access attackers unlimited time.
+// When the learner returns and interacts, aaaTimerFrozen clears on the next tick; the keepalive
+// then fires, detects a 401 if the session expired, and shows the loud banner before any commit.
 function aaaSessionKeepAlive() {
   if (!AAA_DOCEBO_ORIGIN || scorm.isStandalone()) return;
+  if (aaaTimerFrozen()) return;
   fetch(AAA_DOCEBO_ORIGIN + '/manage/v1/user/keep_alive', { method: 'GET', credentials: 'include' })
     .then(function (res) {
       if (res.ok) {
