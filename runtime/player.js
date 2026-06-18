@@ -67,6 +67,15 @@ var FLIGHT_LOG_MAX = 500;
 // read-only GET of Docebo via our telemetry service (no token, no writes).
 var AAA_DOCEBO_TIME_ENDPOINT = 'https://editor.aircrewacademy.com/api/telemetry/docebo-time';
 var AAA_TIME_POLL_MS = 60000;
+// SESSION KEEPALIVE — pings Docebo every 15 min to prevent the platform's 5400s idle-session
+// expiry from silently killing SCORM commits (OP-634 root cause: BR-LAUNCHER-SAVE-SWALLOW hides
+// commit timeouts, completion never reaches Docebo). Origin is auto-derived from document.referrer
+// (the launcher, which is on the Docebo domain) — null in standalone/preview, where keepalive is skipped.
+var AAA_KEEPALIVE_INTERVAL_MS = 900000; // 15 min (5400s / 6 — pings well inside the 90-min window)
+var AAA_DOCEBO_ORIGIN = (function () {
+  try { var ref = document.referrer; if (ref) return new URL(ref).origin; } catch (e) {}
+  return (courseData && courseData.doceboOrigin) || null;
+})();
 var aaaTime = { doceboTimeSec: null, asOf: 0, ok: false }; // ONE store: the gate AND the countdown read this
 // (The time-source mode switch is gone — no "docebo mode" vs "local mode".) The Docebo time is ALWAYS
 // polled when a course is time-gated, so the submit gate can ALWAYS check it as an option (the OR); and
@@ -538,6 +547,54 @@ function aaaShowDegraded() {
   } catch (e) { /* a warning must never break the player */ }
 }
 
+// Shown when the keepalive endpoint returns a non-2xx (session genuinely expired) — distinct from
+// the generic degraded banner because the remediation is specific: reload the page to re-auth.
+var aaaSessionExpiredShown = false;
+function aaaShowSessionExpired() {
+  if (aaaSessionExpiredShown) return;
+  aaaSessionExpiredShown = true;
+  try {
+    var box = document.createElement('div');
+    box.id = 'aaa-session-expired-banner';
+    box.setAttribute('role', 'alert');
+    box.style.cssText = 'position:fixed;top:12px;right:12px;max-width:340px;z-index:2147483647;background:#fef2f2;color:#7f1d1d;border:1px solid #fca5a5;border-left:4px solid #ef4444;border-radius:8px;padding:11px 13px;font:600 13px/1.45 system-ui,Arial,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.15);';
+    var msg = document.createElement('div');
+    msg.textContent = 'Your session has expired. Progress may not save — please reload the page to continue.';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Reload page';
+    btn.style.cssText = 'margin-top:10px;background:#ef4444;color:#fff;border:none;border-radius:6px;padding:6px 12px;font:600 12px system-ui,Arial,sans-serif;cursor:pointer;';
+    btn.onclick = function () { window.location.reload(); };
+    box.appendChild(msg);
+    box.appendChild(btn);
+    (document.body || document.documentElement).appendChild(box);
+  } catch (e) { /* a warning must never break the player */ }
+}
+
+// Ping Docebo's keep_alive endpoint from the learner's browser (credentials:include sends the
+// session cookie). A non-2xx response means the session is expired → loud banner. A network/CORS
+// TypeError means the browser blocked the cross-origin request — logged silently (keepalive not
+// available, but the session isn't necessarily expired yet, so no false-positive banner).
+function aaaSessionKeepAlive() {
+  if (!AAA_DOCEBO_ORIGIN || scorm.isStandalone()) return;
+  fetch(AAA_DOCEBO_ORIGIN + '/manage/v1/user/keep_alive', { method: 'GET', credentials: 'include' })
+    .then(function (res) {
+      if (res.ok) {
+        logEvent('keepalive', 'ok', { status: res.status });
+      } else {
+        logError('keepalive', 'session-expired', 'HTTP ' + res.status);
+        aaaSendErrorReport('keepalive:session-expired', { status: res.status });
+        aaaShowSessionExpired();
+      }
+    })
+    .catch(function (err) {
+      // TypeError = CORS blocked or network failure. Don't trip the degraded banner — keepalive
+      // unavailability ≠ session expired. Log so we can detect if Docebo CORS needs configuring.
+      logError('keepalive', 'fetch-error', err ? err.message : 'unknown');
+      aaaSendErrorReport('keepalive:fetch-error', err);
+    });
+}
+
 function aaaEsc(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
     return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;';
@@ -792,6 +849,13 @@ scorm.init().then(function(session) {
   if (scorm.isStandalone() && window.parent !== window) {
     aaaShowDegraded(); // expected a launcher but none answered — saves will be lost
     aaaSendErrorReport('standalone:no-launcher', 'embedded but SCORM handshake never connected — saves will be lost');
+  }
+
+  // Start Docebo session keepalive. Pings immediately to confirm the session is live at init,
+  // then every 15 min. Skipped in standalone/preview (no Docebo session to keep alive).
+  if (!scorm.isStandalone()) {
+    aaaSessionKeepAlive();
+    setInterval(aaaSessionKeepAlive, AAA_KEEPALIVE_INTERVAL_MS);
   }
 
   // Telemetry identity + session-open marker (the orphaned-session anomaly
