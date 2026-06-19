@@ -74,7 +74,14 @@ var AAA_TIME_POLL_MS = 60000;
 // expiry from silently killing SCORM commits (OP-634 root cause: BR-LAUNCHER-SAVE-SWALLOW hides
 // commit timeouts, completion never reaches Docebo). Origin is auto-derived from document.referrer
 // (the launcher, which is on the Docebo domain) — null in standalone/preview, where keepalive is skipped.
-var AAA_KEEPALIVE_INTERVAL_MS = 900000; // 15 min (5400s / 6 — pings well inside the 90-min window)
+// TEST-ONLY: ?aaaKeepaliveMs=N overrides the interval (e.g. ?aaaKeepaliveMs=5000 fires every 5s
+// so a Playwright / manual test can observe keepalive behaviour without waiting 15 minutes).
+var AAA_KEEPALIVE_INTERVAL_MS = (function () {
+  try {
+    var m = (typeof location !== 'undefined') && (location.search || '').match(/[?&]aaaKeepaliveMs=(\d+)\b/);
+    return m ? Math.max(1000, parseInt(m[1], 10)) : 900000;
+  } catch (e) { return 900000; }
+})();
 var AAA_DOCEBO_ORIGIN = (function () {
   try { var ref = document.referrer; if (ref) return new URL(ref).origin; } catch (e) {}
   return (courseData && courseData.doceboOrigin) || null;
