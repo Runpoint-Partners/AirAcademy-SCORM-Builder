@@ -100,38 +100,75 @@ function loadCourseData(moduleDir) {
   // malformed entry worth warning about.
   const sections = [];
   const pageOrder = [];
+  // Collect leaf PAGES in reading order. A node is a PAGE iff it has a real id AND a real, non-folder
+  // content type (html/quiz/selftest/…). Everything else — a `null`-id sub-folder OR an id-BEARING
+  // section folder (id present, empty/'folder' type, e.g. the P-RNAV "trip" sections) — is a CONTAINER:
+  // not a page itself, but its children must still be collected.
+  //
+  // This MIRRORS the source adapter's `collectPageRefs` (the parity source of truth that produces
+  // `pagesExpected`), so the embedded page count can never silently diverge from it. The previous loop
+  // only recursed `null`-id containers and treated EVERY id-bearing node as a page — so an id-bearing
+  // section folder was mis-read as a (missing) page and its ENTIRE subtree was dropped (P-RNAV courses
+  // lost ~80% of pages). OP-580 fixed the null-id case; this generalizes it to ALWAYS recurse.
   function collectPages(children, sectionName) {
     const collected = [];
     for (const child of children || []) {
-      if (child.id == null || child.id === 'null') {
-        if (Array.isArray(child.children) && child.children.length > 0) {
-          for (const nested of collectPages(child.children, sectionName)) collected.push(nested);
+      const hasChildren = Array.isArray(child.children) && child.children.length > 0;
+      const isPage = child.id != null && child.id !== 'null' && child.type && child.type !== 'folder';
+      if (isPage) {
+        const pageFile = path.join(moduleDir, 'pages', `${moduleId}_${child.id}.json`);
+        if (fs.existsSync(pageFile)) {
+          const pageData = JSON.parse(fs.readFileSync(pageFile, 'utf8'));
+          collected.push({
+            id: child.id,
+            pageNumber: child.pageNumber,
+            name: child.name,
+            type: child.type,
+            data: pageData
+          });
         } else {
-          console.warn(`  [warning] Skipping child with null id in section "${sectionName}" of module ${moduleId}`);
+          console.warn(`  [warning] Page file missing: ${pageFile}, skipping`);
         }
-        continue;
+      } else if (!hasChildren) {
+        // A non-page leaf with no children is a genuine malformed entry worth surfacing (OP-580).
+        console.warn(`  [warning] Skipping non-page leaf (id=${child.id}, type=${child.type}) in section "${sectionName}" of module ${moduleId}`);
       }
-      const pageFile = path.join(moduleDir, 'pages', `${moduleId}_${child.id}.json`);
-      if (!fs.existsSync(pageFile)) {
-        console.warn(`  [warning] Page file missing: ${pageFile}, skipping`);
-        continue;
+      // ALWAYS recurse: section containers (null-id sub-folders AND id-bearing section folders) hold
+      // their pages as children, preserving reading order.
+      if (hasChildren) {
+        for (const nested of collectPages(child.children, sectionName)) collected.push(nested);
       }
-      const pageData = JSON.parse(fs.readFileSync(pageFile, 'utf8'));
-      collected.push({
-        id: child.id,
-        pageNumber: child.pageNumber,
-        name: child.name,
-        type: child.type,
-        data: pageData
-      });
     }
     return collected;
   }
-  for (const folder of contentIndex) {
-    const sectionPages = collectPages(folder.children, folder.name);
-    for (const pageInfo of sectionPages) pageOrder.push(pageInfo);
-    sections.push({ name: folder.name, pages: sectionPages });
+  // Walk the TOP level the same way collectPages walks every level: a top node is EITHER a section
+  // FOLDER (has children → its leaf pages form a named section, recursing sub-folders) OR a PAGE in
+  // its own right (a FLAT contentIndex — top-level entries ARE the pages, no folder nesting). The
+  // previous loop only ever collected `folder.children`, so a flat course collected ZERO pages and
+  // failed the downstream zero-pages gate (the Coulson / old-host courses: contentIndex.contents is
+  // a flat list of html pages, no folders). Collecting a flat top-level page here mirrors the source
+  // adapter's collectPageRefs — the pagesExpected parity source — so the embedded page count matches
+  // what materialize fetched. Nested courses are unchanged (they take the `hasChildren` branch).
+  const flatLeafPages = [];
+  for (const node of contentIndex) {
+    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    if (hasChildren) {
+      const sectionPages = collectPages(node.children, node.name);
+      for (const pageInfo of sectionPages) pageOrder.push(pageInfo);
+      sections.push({ name: node.name, pages: sectionPages });
+    } else {
+      // No children: a flat top-level PAGE (collectPages loads its content file) or a malformed leaf
+      // (collectPages emits the standard warning and collects nothing). Either way, reuse the exact
+      // page-classifying path rather than special-casing it here.
+      const leaf = collectPages([node], node.name);
+      for (const pageInfo of leaf) {
+        pageOrder.push(pageInfo);
+        flatLeafPages.push(pageInfo);
+      }
+    }
   }
+  // Group any flat top-level pages into one default (unnamed) section so navigation still renders.
+  if (flatLeafPages.length > 0) sections.push({ name: '', pages: flatLeafPages });
 
   // Extract quiz options
   const quizPage = pageOrder.find(function (p) { return p.type === 'quiz'; });
