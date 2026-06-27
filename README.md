@@ -130,19 +130,22 @@ player repo) and substitutes six placeholders: `{{CONTENT_BASE_URL}}`, `{{COURSE
 
 ## Runtime assets (`runtime/`)
 
-Only **one** file is vendored: `launcher-template.html` — the per-course SCORM launcher baked into each
-ZIP by `src/scorm/launcher.js`.
+Two declarative `{{PLACEHOLDER}}` templates — the per-course artifacts baked into each SCORM ZIP by
+`src/scorm/` (each filled by a thin substitution function). No player code lives here.
 
-| File | Role |
-|---|---|
-| `launcher-template.html` | Template for the per-course SCORM launcher |
+| File | Role | Owner | Filled by |
+|---|---|---|---|
+| `launcher-template.html` | Per-course SCORM launcher (iframe host + SCORM bridge) | synced from player repo | `launcher.js` → `generateLauncher` |
+| `manifest-template.xml` | `imsmanifest.xml` SCORM 2004 contract | builder-owned (no upstream) | `manifest.js` → `generateManifest` |
 
-**Current sync:** commit `3f410c8` (2026-06-18). See `runtime/PROVENANCE.md`.
+**Current launcher sync:** commit `3f410c8` (2026-06-18). See `runtime/PROVENANCE.md`.
 
 **To refresh after a launcher change:**
 ```bash
-scripts/sync-runtime-assets.sh /path/to/AirAcademy   # copies launcher-template.html only
+scripts/sync-runtime-assets.sh /path/to/AirAcademy   # copies launcher-template.html ONLY (not the manifest)
 ```
+`manifest-template.xml` is authored here, not synced — its byte-identity to the pre-template output is
+pinned by `src/scorm/__tests__/manifest-parity.test.js`.
 
 ### The player is NOT vendored (shared-player only)
 `player.js` / `player.css` / `scorm-client.js` are **no longer here**. A built course is a thin shell

@@ -1,7 +1,17 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 /**
  * Generates imsmanifest.xml for a SCORM 2004 4th Edition package.
+ *
+ * Mirrors generateLauncher: the XML body is a declarative artifact
+ * (runtime/manifest-template.xml) with {{PLACEHOLDER}} holes; this function only fills them.
+ * The ONLY per-course variance is the package identifier (courseId + networkId) and the course
+ * title (×2). The title is the lone bit of irreducible logic — it must be XML-escaped before
+ * substitution. Everything else (schema, sequencing, nav-hiding, the launcher.html resource) is
+ * constant boilerplate living in the template.
  *
  * @param {Object} opts
  * @param {string} opts.courseId   - Numeric course ID (e.g. "100007")
@@ -14,7 +24,7 @@ function generateManifest({ courseId, networkId, courseName }) {
   if (!networkId) throw new Error('networkId is required');
   if (!courseName) throw new Error('courseName is required');
 
-  // Escape XML special characters in the course name
+  // Escape XML special characters in the course name (the only non-template logic).
   const escapedName = String(courseName)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -22,68 +32,16 @@ function generateManifest({ courseId, networkId, courseName }) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="AAA_${courseId}_${networkId}"
-  version="1.0"
-  xmlns="http://www.imsglobal.org/xsd/imscp_v1p1"
-  xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_v1p3"
-  xmlns:adlseq="http://www.adlnet.org/xsd/adlseq_v1p3"
-  xmlns:adlnav="http://www.adlnet.org/xsd/adlnav_v1p3"
-  xmlns:imsss="http://www.imsglobal.org/xsd/imsss"
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="
-    http://www.imsglobal.org/xsd/imscp_v1p1 imscp_v1p1.xsd
-    http://www.adlnet.org/xsd/adlcp_v1p3 adlcp_v1p3.xsd
-    http://www.adlnet.org/xsd/adlseq_v1p3 adlseq_v1p3.xsd
-    http://www.adlnet.org/xsd/adlnav_v1p3 adlnav_v1p3.xsd
-    http://www.imsglobal.org/xsd/imsss imsss_v1p0.xsd">
+  const templatePath = path.join(__dirname, '..', '..', 'runtime', 'manifest-template.xml');
+  // Normalize CRLF→LF so file storage (git autocrlf / editors) can never drift the bytes — the
+  // pre-template output was a JS template literal (LF), and the golden-parity test pins LF.
+  let xml = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
 
-  <metadata>
-    <schema>ADL SCORM</schema>
-    <schemaversion>2004 4th Edition</schemaversion>
-  </metadata>
+  xml = xml.split('{{COURSE_ID}}').join(courseId);
+  xml = xml.split('{{NETWORK_ID}}').join(networkId);
+  xml = xml.split('{{TITLE}}').join(escapedName);
 
-  <organizations default="ORG-001">
-    <organization identifier="ORG-001">
-      <title>${escapedName}</title>
-      <item identifier="ITEM-001" identifierref="RES-001" isvisible="true">
-        <title>${escapedName}</title>
-
-        <!-- Sequencing: single SCO, no LMS-managed sequencing -->
-        <imsss:sequencing>
-          <imsss:controlMode
-            choice="true"
-            flow="true"
-            choiceExit="true"
-            forwardOnly="false" />
-          <imsss:deliveryControls
-            completionSetByContent="true"
-            objectiveSetByContent="true" />
-        </imsss:sequencing>
-
-        <!-- Disable LMS-provided navigation UI; course handles its own nav -->
-        <adlnav:presentation>
-          <adlnav:navigationInterface>
-            <adlnav:hideLMSUI>previous</adlnav:hideLMSUI>
-            <adlnav:hideLMSUI>continue</adlnav:hideLMSUI>
-            <adlnav:hideLMSUI>exit</adlnav:hideLMSUI>
-            <adlnav:hideLMSUI>abandon</adlnav:hideLMSUI>
-          </adlnav:navigationInterface>
-        </adlnav:presentation>
-      </item>
-    </organization>
-  </organizations>
-
-  <resources>
-    <resource identifier="RES-001"
-      type="webcontent"
-      adlcp:scormType="sco"
-      href="launcher.html">
-      <file href="launcher.html" />
-    </resource>
-  </resources>
-
-</manifest>`;
+  return xml;
 }
 
 module.exports = { generateManifest };

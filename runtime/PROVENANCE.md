@@ -1,10 +1,28 @@
-# Vendored runtime — provenance
+# Runtime templates — provenance
 
-Only ONE file is vendored here now: **`launcher-template.html`** — the per-course SCORM launcher shell
-the builder bakes into each course's SCORM ZIP (`src/scorm/launcher.js` → `createScormPackage`).
+Two declarative templates live here — the per-course artifacts the builder bakes into each SCORM ZIP
+(`src/scorm/package.js` → `createScormPackage`). Both are `{{PLACEHOLDER}}` templates filled by thin
+substitution functions; neither contains player code.
+
+| File | Owner | Filled by |
+|------|-------|-----------|
+| `launcher-template.html` | **synced** from the player repo | `src/scorm/launcher.js` → `generateLauncher` |
+| `manifest-template.xml` | **builder-owned** (authored here) | `src/scorm/manifest.js` → `generateManifest` |
+
+### `launcher-template.html` (synced)
+The SCORM launcher shell (iframe host + SCORM API bridge). Kept in sync with the player repo.
 
 - Source: `Runpoint-Partners/AirAcademy` → `packages/course-player/src/launcher-template.html`
 - Synced from commit: **`3f410c8`** (2026-06-18)
+
+### `manifest-template.xml` (builder-owned — do NOT sync)
+The `imsmanifest.xml` SCORM 2004 4th-Ed contract. It was extracted from a JS template literal that
+lived inline in `manifest.js` (Tier-0 refactor, 2026-06-27) so the XML is a lintable declarative
+artifact, symmetric with the launcher. It has **no upstream** — `sync-runtime-assets.sh` must not touch
+it. Holes: `{{COURSE_ID}}`, `{{NETWORK_ID}}`, `{{TITLE}}` (the title is XML-escaped before substitution).
+Byte-identity with the pre-refactor output is pinned by `src/scorm/__tests__/manifest-parity.test.js`
+(golden fixtures captured from the old imperative function). Edit the XML here, re-bless the goldens
+deliberately if the contract must change.
 
 ## The player is NO LONGER vendored
 `player.js`, `player.css`, and `scorm-client.js` used to be vendored here and inlined into each course
