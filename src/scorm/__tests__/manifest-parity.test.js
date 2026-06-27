@@ -1,17 +1,16 @@
 'use strict';
 
 /**
- * manifest-parity.test.js — the template-based generateManifest must render BYTE-IDENTICAL to the
- * pre-refactor imperative output (Tier 0 = pure refactor, zero behavior change).
+ * manifest-parity.test.js — generateManifest renders from runtime/manifest-template.xml, and its ONLY
+ * per-course variables are COURSE_ID + NETWORK_ID (composed into the package identifier). There is no
+ * SCO <title> — Docebo inherits the real course name (verified in sandbox) — so courseName is NOT a
+ * manifest input. Everything else in the template is constant.
  *
- * The golden fixtures were captured from the OLD imperative manifest.js BEFORE the template
- * extraction (LF line endings, no trailing newline — exactly what the JS template literal emitted).
- * If this test is ever RED, the refactor changed the shipped bytes — which existing live SCORM
- * packages + the validator depend on — and must be reverted or the fixtures consciously re-blessed.
- *
- * Re-blessed 2026-06-27: schemaversion 2004 4th → 3rd Edition. Docebo eng. confirmed they support only
- * 2004 3rd Edition (a subset of 4th) or 1.2; our launcher uses ONLY the 2004 RTE API (API_1484_11) +
- * data-model elements present in 3rd Edition (no adl.data / audio_captioning), so no launcher change.
+ * The golden fixture pins the exact rendered bytes (LF, no trailing newline — what the SCORM zip
+ * carries). Re-bless deliberately on a contract change:
+ *   - 2026-06-27 schemaversion 2004 4th → 3rd Edition (Docebo supports 3rd/1.2 only; our launcher uses
+ *     only 3rd-edition RTE elements — no adl.data / audio_captioning — so no launcher change).
+ *   - 2026-06-27 removed the SCO <title> (COURSE_ID + NETWORK_ID are the only sanctioned variables).
  */
 
 const { describe, it } = require('node:test');
@@ -26,39 +25,24 @@ const FIX = path.join(__dirname, 'fixtures');
 // canonical golden is LF (what the zip actually carries). .gitattributes also pins these to LF.
 const read = (f) => fs.readFileSync(path.join(FIX, f), 'utf8').replace(/\r\n/g, '\n');
 
-const CASES = [
-  {
-    golden: 'manifest-plain.golden.xml',
-    opts: { courseId: '100007', networkId: '668', courseName: 'Basic Indoctrination' },
-  },
-  {
-    golden: 'manifest-xmlspecial.golden.xml',
-    opts: { courseId: '141600', networkId: '164', courseName: 'Crew & "Safety" <Ops> \'Manual\'' },
-  },
-];
+describe('generateManifest — declarative template, only COURSE_ID + NETWORK_ID', () => {
+  it('renders manifest-plain.golden.xml byte-for-byte', () => {
+    assert.equal(generateManifest({ courseId: '100007', networkId: '668' }), read('manifest-plain.golden.xml'));
+  });
 
-describe('generateManifest — byte-identical to the pre-template golden', () => {
-  for (const { golden, opts } of CASES) {
-    it(`renders ${golden} byte-for-byte`, () => {
-      const out = generateManifest(opts);
-      assert.equal(out, read(golden));
-    });
-  }
+  it('composes the identifier from courseId + networkId (not hardcoded)', () => {
+    const out = generateManifest({ courseId: '141600', networkId: '164' });
+    assert.ok(out.includes('identifier="AAA_141600_164"'), 'identifier must be AAA_<courseId>_<networkId>');
+  });
 
-  it('leaves no unfilled {{PLACEHOLDER}} in the rendered manifest', () => {
-    const out = generateManifest({ courseId: '1', networkId: '2', courseName: 'X' });
+  it('depends on ONLY the two sanctioned variables — no <title>, no leftover placeholder', () => {
+    const out = generateManifest({ courseId: '1', networkId: '2' });
     assert.ok(!/\{\{[A-Z_]+\}\}/.test(out), 'all placeholders must be substituted');
+    assert.ok(!out.includes('<title>'), 'manifest must carry no SCO <title> (Docebo inherits the course name)');
   });
 
-  it('XML-escapes the title (the lone bit of non-template logic)', () => {
-    const out = generateManifest({ courseId: '1', networkId: '2', courseName: 'A & B <c> "d" \'e\'' });
-    assert.ok(out.includes('<title>A &amp; B &lt;c&gt; &quot;d&quot; &apos;e&apos;</title>'));
-    assert.ok(!out.includes('<title>A & B'), 'raw ampersand must not survive into the XML');
-  });
-
-  it('still requires courseId / networkId / courseName', () => {
-    assert.throws(() => generateManifest({ networkId: '2', courseName: 'X' }), /courseId is required/);
-    assert.throws(() => generateManifest({ courseId: '1', courseName: 'X' }), /networkId is required/);
-    assert.throws(() => generateManifest({ courseId: '1', networkId: '2' }), /courseName is required/);
+  it('requires courseId + networkId (the only inputs)', () => {
+    assert.throws(() => generateManifest({ networkId: '2' }), /courseId is required/);
+    assert.throws(() => generateManifest({ courseId: '1' }), /networkId is required/);
   });
 });

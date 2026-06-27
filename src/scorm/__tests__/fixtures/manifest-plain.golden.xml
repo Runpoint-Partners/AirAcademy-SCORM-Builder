@@ -21,9 +21,9 @@
 
   <organizations default="ORG-001">
     <organization identifier="ORG-001">
-      <title>Basic Indoctrination</title>
       <item identifier="ITEM-001" identifierref="RES-001" isvisible="true">
-        <title>Basic Indoctrination</title>
+        <!-- No SCO title element: Docebo inherits the real course name. The ONLY per-course
+             variables are COURSE_ID + NETWORK_ID, in the manifest identifier above. -->
 
         <!-- Sequencing: single SCO, no LMS-managed sequencing -->
         <imsss:sequencing>

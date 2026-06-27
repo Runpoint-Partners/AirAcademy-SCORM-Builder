@@ -17,7 +17,9 @@ const { generateLauncher } = require('./launcher');
  * @returns {Promise<Buffer>} The SCORM ZIP as a Buffer
  */
 async function createScormPackage({ courseId, networkId, courseName, contentVersion, contentBaseUrl, contentUrl }) {
-  const manifest = generateManifest({ courseId, networkId, courseName });
+  // courseName is no longer used (no SCO <title> in the manifest — Docebo inherits the real course
+  // name). It stays in createScormPackage's signature only for API stability with existing callers.
+  const manifest = generateManifest({ courseId, networkId });
   const launcher = generateLauncher({ courseId, networkId, contentVersion, contentBaseUrl, contentUrl });
 
   return new Promise((resolve, reject) => {
