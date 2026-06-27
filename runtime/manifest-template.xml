@@ -16,7 +16,7 @@
 
   <metadata>
     <schema>ADL SCORM</schema>
-    <schemaversion>2004 4th Edition</schemaversion>
+    <schemaversion>2004 3rd Edition</schemaversion>
   </metadata>
 
   <organizations default="ORG-001">

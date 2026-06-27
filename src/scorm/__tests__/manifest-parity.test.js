@@ -8,6 +8,10 @@
  * extraction (LF line endings, no trailing newline — exactly what the JS template literal emitted).
  * If this test is ever RED, the refactor changed the shipped bytes — which existing live SCORM
  * packages + the validator depend on — and must be reverted or the fixtures consciously re-blessed.
+ *
+ * Re-blessed 2026-06-27: schemaversion 2004 4th → 3rd Edition. Docebo eng. confirmed they support only
+ * 2004 3rd Edition (a subset of 4th) or 1.2; our launcher uses ONLY the 2004 RTE API (API_1484_11) +
+ * data-model elements present in 3rd Edition (no adl.data / audio_captioning), so no launcher change.
  */
 
 const { describe, it } = require('node:test');
