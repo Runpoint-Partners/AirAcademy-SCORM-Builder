@@ -18,7 +18,9 @@ const path = require('path');
 const { generateManifest } = require('../manifest');
 
 const FIX = path.join(__dirname, 'fixtures');
-const read = (f) => fs.readFileSync(path.join(FIX, f), 'utf8');
+// Normalize CRLF→LF on read so a Windows checkout (core.autocrlf) can't false-fail this test — the
+// canonical golden is LF (what the zip actually carries). .gitattributes also pins these to LF.
+const read = (f) => fs.readFileSync(path.join(FIX, f), 'utf8').replace(/\r\n/g, '\n');
 
 const CASES = [
   {

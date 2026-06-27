@@ -690,12 +690,16 @@ async function runWithConcurrency(tasks, limit) {
  * @param {string} opts.version
  * @returns {Promise<{ html: string, entries: Array }>}
  */
+// reference_library/<net>/Module_Headers/<file>.png are the standard AAA section-header banners
+// (Copyright / Using This Module / Exam / Module End …). They are public on the Ascent host (200) just
+// like media_library, but were NOT in the match list, so they shipped as bare `/files/` refs → 403 on
+// the learner's S3 origin. They resolve through the SAME downloadPublicFile→uploadMediaToS3 path.
 function publicAscentRelativePattern() {
-  return /((?:src|href)\s*=\s*)(["'])((?:\.\.\/)*(?:\/)?(?:files\/media_library|learning_object_library|content|media)\/.*?)\2/gi;
+  return /((?:src|href)\s*=\s*)(["'])((?:\.\.\/)*(?:\/)?(?:files\/media_library|files\/reference_library|learning_object_library|content|media)\/.*?)\2/gi;
 }
 
 function publicAscentAbsolutePattern() {
-  return /((?:src|href)\s*=\s*)(["'])(https?:\/\/ascent\.aerostudies\.com\/(files\/media_library|learning_object_library|content|media)\/.*?)\2/gi;
+  return /((?:src|href)\s*=\s*)(["'])(https?:\/\/ascent\.aerostudies\.com\/(files\/media_library|files\/reference_library|learning_object_library|content|media)\/.*?)\2/gi;
 }
 
 async function resolvePublicAscentMedia(html, { networkId, courseId, version }) {

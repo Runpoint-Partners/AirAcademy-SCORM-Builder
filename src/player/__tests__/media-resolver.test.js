@@ -19,7 +19,28 @@ const {
   findHashFileUrls,
   resolveHashFiles,
   summarizeUnresolved,
+  publicAscentRelativePattern,
+  publicAscentAbsolutePattern,
 } = require('../media-resolver');
+
+const matchAll = (re, html) => { const out = []; let m; while ((m = re.exec(html)) !== null) out.push(m[3]); return out; };
+
+describe('publicAscentRelativePattern — reference_library Module-Header banners (the 28467 broken-media defect)', () => {
+  it('MATCHES /files/reference_library/<net>/Module_Headers/<file>.png (was unhandled → shipped bare → 403)', () => {
+    const html = '<img src="/files/reference_library/90/Module_Headers/AAA%20purple%20copyright.png">';
+    assert.deepEqual(matchAll(publicAscentRelativePattern(), html), ['/files/reference_library/90/Module_Headers/AAA%20purple%20copyright.png']);
+  });
+  it('STILL matches existing media_library refs (no regression)', () => {
+    assert.deepEqual(matchAll(publicAscentRelativePattern(), '<img src="/files/media_library/90/foo.jpg">'), ['/files/media_library/90/foo.jpg']);
+  });
+  it('does NOT match hash files (handled by the separate hash resolver)', () => {
+    assert.deepEqual(matchAll(publicAscentRelativePattern(), '<img src="/files/668-abc123def456.jpg">'), []);
+  });
+  it('absolute pattern matches an ascent reference_library URL', () => {
+    const m = publicAscentAbsolutePattern().exec('<img src="https://ascent.aerostudies.com/files/reference_library/90/Module_Headers/AAA%20purple%20exam.png">');
+    assert.ok(m !== null && m[3].includes('reference_library'));
+  });
+});
 
 // A real failing ref from course 159369 (48-hex hash).
 const HASH = '/files/211-1af6ace04078b6e49f4afc53c1d428670f8e03bcfc364e45';

@@ -1,0 +1,8 @@
+# The per-course SCORM templates and the manifest golden fixtures must stay LF in the working tree.
+# Their consumers (launcher.js / manifest.js) normalize CRLF→LF on read, and the rendered bytes baked
+# into each SCORM zip are LF — so the byte-identity golden test (manifest-parity.test.js) compares
+# against LF goldens. Without this, core.autocrlf=true would check these out as CRLF on Windows and the
+# parity test would falsely fail on a fresh clone.
+runtime/manifest-template.xml   text eol=lf
+runtime/launcher-template.html  text eol=lf
+src/scorm/__tests__/fixtures/*.golden.xml text eol=lf
