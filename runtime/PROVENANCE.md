@@ -1,28 +1,28 @@
-# Vendored runtime player assets — provenance
+# Vendored runtime — provenance
 
-These are the AirAcademy **runtime player** assets the SCORM builder embeds into each course's
-content (and/or deploys to S3 `player/v1/`). A SCORM package must ship/reference a runtime that
-renders the course and talks to the LMS, so the builder needs these as a build input.
+Only ONE file is vendored here now: **`launcher-template.html`** — the per-course SCORM launcher shell
+the builder bakes into each course's SCORM ZIP (`src/scorm/launcher.js` → `createScormPackage`).
 
-They are **sourced from `course-player`** (the runtime player's home, in `Runpoint-Partners/AirAcademy`)
-and vendored here so the builder is **self-contained** (no filesystem reach into a sibling repo).
-
-- Source: `Runpoint-Partners/AirAcademy` → `packages/course-player/src/`
+- Source: `Runpoint-Partners/AirAcademy` → `packages/course-player/src/launcher-template.html`
 - Synced from commit: **`3f410c8`** (2026-06-18)
-- Files: `player.css`, `player.js`, `scorm-client.js`, `launcher-template.html`
 
-## Refresh (one command)
-Re-vendor when the runtime player changes:
+## The player is NO LONGER vendored
+`player.js`, `player.css`, and `scorm-client.js` used to be vendored here and inlined into each course
+(the old `generateIndexHtml` "inline mode"). **That is gone.** The builder now generates a thin
+**shared-player** shell that references the player deployed centrally to S3 by the player repo
+(`AirAcademyOWS`). The builder reads the player's base URL + canonical asset list from the
+**`player-manifest.json`** the player deploy publishes next to the assets
+(`src/player/build-player.js` → `loadPlayerManifest`). One source of truth, no copy to drift.
+
+So a player change ships from `AirAcademyOWS` to S3 `player/v1/` and reaches every live course centrally
+— the builder is never re-run for it. The builder is only re-run for **content** or **launcher** changes.
+
+## Refresh the launcher template (one command)
 ```
-scripts/sync-runtime-assets.sh /path/to/AirAcademy   # copies the 4 files from packages/course-player/src
+scripts/sync-runtime-assets.sh /path/to/AirAcademy   # copies launcher-template.html from packages/course-player/src
 ```
-Then commit `runtime/` and update the "Synced from commit" line above.
+Then commit `runtime/launcher-template.html` and update the "Synced from commit" line above.
 
-## TODO — retire this snapshot (the remaining debt)
-This is a **documented snapshot**, not the long-term home. The clean end-state is a SINGLE source for
-the runtime player. Once the `course-player` TypeScript rewrite settles, do ONE of:
-- publish a versioned `@runpoint-partners/airacademy-player-runtime` package consumed by BOTH the
-  builder and `course-player`, or
-- switch the builder to **shared-player mode** (courses load the player from S3 `player/v1/`).
-
-Tracked in the migration repo `TODO.md`.
+## TODO — retire this last snapshot
+The clean end-state vendors nothing. The launcher template should likewise come from a shared, versioned
+source (or fold into the husk migration's hollow launcher). Tracked in the migration repo `TODO.md`.

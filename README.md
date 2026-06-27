@@ -54,13 +54,15 @@ const { createScormPackage } =
 |---|---|---|
 | `buildPlayer(options?)` | `async (opts) => { outputPath, courseData, mediaReport }` | Full pipeline: loads module JSON from disk, logs into Ascent, resolves all media to S3, writes `index.html` + `media-report.json` to `outputDir`. |
 | `loadCourseData(moduleDir)` | `(string) => Object` | Parses `module_<id>.json` + per-page JSON files into a structured `courseData` object (pages, sections, quiz, timer). Handles nested sub-folder sections (OP-580 fix). |
-| `generateIndexHtml(courseData, options?)` | `(obj, {sharedPlayer?}) => string` | Renders the final `index.html`. `sharedPlayer: true` = thin shell referencing `player/v1/` on S3; default = self-contained with inlined runtime assets from `runtime/`. |
+| `generateIndexHtml(courseData, manifest)` | `(obj, {base, assets[]}) => string` | Renders the final `index.html` — a thin shell that references the shared player **named by the deployed manifest** (`{base, assets}`). Inline mode was removed; pass `loadPlayerManifest()` output (or let `buildPlayer` do it). |
+| `loadPlayerManifest(implementation?)` | `async (string) => {base, assets[], ...}` | Fetches `player-manifest.json` the player repo publishes to S3. `'javascript'` (default) → `player/v1`; `'vue'` → `player/v2`. `AAA_PLAYER_MANIFEST_URL` env overrides. Throws loud if absent (no vendored fallback). |
 | `formatIso8601Duration(ms)` | `(number) => string` | Utility: converts milliseconds to ISO 8601 duration string. |
 
 `buildPlayer` options:
 - `moduleDir` — path to the module data directory (default: `../../data/module_100007`)
 - `outputDir` — where to write `index.html` and `media-report.json` (default: `../../build/player`)
 - `ascentCookies` — optional pre-authenticated Ascent cookie string (pipeline passes this to avoid per-course login)
+- `playerImpl` — `'javascript'` (default, `player/v1`) or `'vue'` (`player/v2`). Selects which deployed player the shell references (reads its manifest). Default output is byte-for-byte the live JS player.
 
 ### `media-resolver` — `src/player/media-resolver.js`
 
@@ -128,27 +130,27 @@ player repo) and substitutes six placeholders: `{{CONTENT_BASE_URL}}`, `{{COURSE
 
 ## Runtime assets (`runtime/`)
 
-The four files in `runtime/` are **vendored snapshots** of the live shared-player source from
-`Runpoint-Partners/AirAcademy` (`packages/course-player/src/`):
+Only **one** file is vendored: `launcher-template.html` — the per-course SCORM launcher baked into each
+ZIP by `src/scorm/launcher.js`.
 
 | File | Role |
 |---|---|
-| `player.js` | Course player logic (embedded into inline-player builds, referenced externally in shared-player builds) |
-| `player.css` | Player styles |
-| `scorm-client.js` | SCORM 2004 API bridge (postMessage) |
 | `launcher-template.html` | Template for the per-course SCORM launcher |
 
 **Current sync:** commit `3f410c8` (2026-06-18). See `runtime/PROVENANCE.md`.
 
-**To refresh after a player change:**
+**To refresh after a launcher change:**
 ```bash
-scripts/sync-runtime-assets.sh /path/to/AirAcademy
-# Then: commit runtime/ and update the "Synced from commit" line in runtime/PROVENANCE.md
+scripts/sync-runtime-assets.sh /path/to/AirAcademy   # copies launcher-template.html only
 ```
 
-The authoritative `player.js` lives in `AirAcademyOWS` (`packages/course-player/src/`). This
-vendored copy exists only so the builder is self-contained; the long-term plan is a versioned
-shared runtime package or full shared-player mode (see `runtime/PROVENANCE.md` TODO).
+### The player is NOT vendored (shared-player only)
+`player.js` / `player.css` / `scorm-client.js` are **no longer here**. A built course is a thin shell
+that references the player deployed centrally to S3 by `AirAcademyOWS` (`player/v1/`). The builder reads
+the base URL + asset list from the **`player-manifest.json`** that the player deploy publishes
+(`build-player.js` → `loadPlayerManifest`) — a single source of truth, no vendored copy to drift. A player
+change reaches every live course centrally; the builder is re-run only for **content** or **launcher**
+changes, never for a player update.
 
 ---
 

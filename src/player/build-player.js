@@ -319,126 +319,64 @@ function loadCourseData(moduleDir) {
   };
 }
 
-const S3_PLAYER_BASE = 'https://aaa-courses.s3.us-east-2.amazonaws.com/player/v1';
+// ── PLAYER MANIFEST ────────────────────────────────────────────────────────────────────────────
+// The builder NEVER vendors player code. A built course is a thin shell that references the player
+// deployed centrally to S3 by the player repo (AirAcademyOWS); that deploy publishes a
+// `player-manifest.json` next to the assets. The builder reads it for the base URL + the CANONICAL
+// asset list, so a player asset added/renamed in the player repo flows here with zero edits (no more
+// hand-synced `runtime/` copies that drift). JS=player/v1 (default), Vue=player/v2.
+const PLAYER_MANIFEST_URLS = Object.freeze({
+  javascript: 'https://aaa-courses.s3.us-east-2.amazonaws.com/player/v1/player-manifest.json',
+  vue: 'https://aaa-courses.s3.us-east-2.amazonaws.com/player/v2/player-manifest.json',
+});
+const DEFAULT_PLAYER_IMPL = 'javascript';
+const _playerManifestCache = new Map();
 
 /**
- * Generate the course player index.html.
+ * Fetch the player manifest the player repo published to S3 (public; no creds). Cached per URL.
+ * Throws LOUDLY when absent/malformed — there is NO vendored fallback (that is the whole point).
  *
- * Key differences from archive/demo/build-scorm.js:
- * - No <base href="https://ascent.aerostudies.com"> tag
- * - No SCORM 1.2 API.LMSxxx calls
- * - Uses ScormClient (external script) via postMessage bridge
- * - Loads scorm-client.js as co-located script tag (or external in shared mode)
+ * @param {string} [implementation='javascript']  'javascript' (player/v1) or 'vue' (player/v2).
+ *   `AAA_PLAYER_MANIFEST_URL` env overrides the URL (sandbox/test).
+ * @returns {Promise<{base:string, assets:string[], implementation?:string, version?:string}>}
+ */
+async function loadPlayerManifest(implementation) {
+  const impl = implementation || DEFAULT_PLAYER_IMPL;
+  const url = process.env.AAA_PLAYER_MANIFEST_URL || PLAYER_MANIFEST_URLS[impl];
+  if (!url) {
+    throw new Error(`unknown player implementation '${impl}' (known: ${Object.keys(PLAYER_MANIFEST_URLS).join(', ')})`);
+  }
+  if (_playerManifestCache.has(url)) return _playerManifestCache.get(url);
+  let res;
+  try {
+    res = await fetch(url, { cache: 'no-store' });
+  } catch (e) {
+    throw new Error(`player manifest unreachable at ${url}: ${e.message}. Deploy the player (publishes player-manifest.json) first — no vendored fallback.`);
+  }
+  if (!res.ok) {
+    throw new Error(`player manifest HTTP ${res.status} at ${url}. Deploy the player (publishes player-manifest.json) first — no vendored fallback.`);
+  }
+  const manifest = await res.json();
+  if (!manifest || typeof manifest.base !== 'string' || !Array.isArray(manifest.assets) || manifest.assets.length === 0) {
+    throw new Error(`player manifest at ${url} is malformed — expected {base:string, assets:string[]}`);
+  }
+  _playerManifestCache.set(url, manifest);
+  return manifest;
+}
+
+/**
+ * Generate the course player index.html — a thin shell that references the shared player assets named
+ * by the deployed manifest. Only the course data is embedded inline. (Inline-player mode was removed:
+ * baking a frozen player copy into a course defeats central player updates.)
  *
  * @param {Object} courseData  Course data from loadCourseData
- * @param {Object} [options]
- * @param {boolean} [options.sharedPlayer=false]  If true, reference external CSS/JS from S3
+ * @param {{base:string, assets:string[]}} manifest  Resolved player manifest (see loadPlayerManifest)
  */
-function generateIndexHtml(courseData, options) {
-  options = options || {};
-  const courseDataJson = JSON.stringify(courseData);
-
-  // --- Shared player mode: thin shell with external assets ---
-  if (options.sharedPlayer) {
-    return generateSharedPlayerHtml(courseData, courseDataJson);
+function generateIndexHtml(courseData, manifest) {
+  if (!manifest || typeof manifest.base !== 'string' || !Array.isArray(manifest.assets)) {
+    throw new Error('generateIndexHtml(courseData, manifest): a resolved player manifest ({base, assets[]}) is required — call buildPlayer, or pass loadPlayerManifest() output');
   }
-
-  // Read the vendored runtime player assets (synced from course-player — see runtime/PROVENANCE.md).
-  const runtimeDir = path.join(__dirname, '..', '..', 'runtime');
-  // Normalize CRLF→LF for files extracted from template literals (JS spec normalizes CRLF in template literals).
-  // scorm-client.js keeps its original line endings since it was always read from disk.
-  const readLF = (filePath) => fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
-  const css = readLF(path.join(runtimeDir, 'player.css'));
-  const scormClientJs = fs.readFileSync(path.join(runtimeDir, 'scorm-client.js'), 'utf8')
-    .replace(/<\/script>/gi, '<\\/script>');
-  const playerJs = readLF(path.join(runtimeDir, 'player.js'))
-    .replace('{{COURSE_DATA_JSON}}', courseDataJson)
-    .replace('{{FORMAT_ISO8601_DURATION}}', formatIso8601Duration.toString());
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${courseData.courseName}</title>
-<style>
-${css}</style>
-</head>
-<body>
-<div id="sidebar">
-  <div id="sidebar-header">
-    <h2>COURSE NAVIGATION</h2>
-    <div class="course-title" id="course-title-sidebar"></div>
-  </div>
-  <div id="sidebar-nav"></div>
-  <div id="progress-bar">
-    <div class="bar"><div class="fill" id="progress-fill"></div></div>
-    <div class="text" id="progress-text">0 of 0 pages</div>
-  </div>
-</div>
-<div id="main">
-  <div id="toolbar">
-    <div>
-      <div class="page-info" id="page-info"></div>
-      <div class="page-title" id="page-title-bar"></div>
-    </div>
-    <span id="timer-display"></span>
-  </div>
-  <div id="content-area">
-    <div id="content-inner"></div>
-  </div>
-  <div id="nav-buttons">
-    <button class="nav-btn" id="prev-btn" onclick="prevPage()">&#9664; Previous</button>
-    <div class="nav-center-group">
-      <button id="refs-btn" class="nav-secondary-btn" onclick="openRefsModal()" title="Reference Documents" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1.5V8h4.5L14 3.5zM8 13h8v1.5H8V13zm0 3h8v1.5H8V16zm0-6h5v1.5H8V10z"/></svg><span>Reference Documents</span></button>
-      <button id="feedback-btn" class="nav-secondary-btn" onclick="toggleFeedback()" title="Ask an Instructor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.12 5.12 3 6.5 3h11C18.88 3 20 4.12 20 5.5v7c0 1.38-1.12 2.5-2.5 2.5H10l-4.6 4.22c-.8.73-2.1.16-2.1-.92V5.5z"/><circle cx="9" cy="9" r="1.4"/><circle cx="12" cy="9" r="1.4"/><circle cx="15" cy="9" r="1.4"/></svg><span>Ask an Instructor</span></button>
-    </div>
-    <button class="nav-btn" id="next-btn" onclick="nextPage()">Next &#9654;</button>
-  </div>
-  <div id="selftest-gate-msg">Please answer the review question before continuing.</div>
-  <div id="timer-gate-msg">You must spend the minimum required time in this course before it can be marked complete.</div>
-</div>
-<div id="lightbox-overlay"><button id="lightbox-close" onclick="closeLightbox()" title="Close">&times;</button><img id="lightbox-img" src="" alt=""><div id="lightbox-hint">Click outside image or press Escape to close</div></div>
-<div id="ref-page-overlay" onclick="if(event.target===this)closeRefPageModal()"><div id="ref-page-modal"><div class="ref-title-bar"><h3 id="ref-page-title">Reference Page</h3><button class="ref-close-btn" onclick="closeRefPageModal()" title="Close">&times;</button></div><div class="ref-body" id="ref-page-body"></div></div></div>
-<div id="refs-modal-overlay" onclick="if(event.target===this)closeRefsModal()"><div id="refs-modal"><div class="ref-title-bar"><h3>Reference Documents</h3><button class="ref-close-btn" onclick="closeRefsModal()" title="Close">&times;</button></div><div id="refs-modal-body"></div></div></div>
-<div id="submit-modal-overlay" onclick="if(event.target===this)this.classList.remove(‘active’)"><div id="submit-modal"></div></div>
-
-<div id="diag-overlay" onclick="if(event.target===this)closeDiagPanel()">
-  <div id="diag-panel">
-    <div class="diag-header"><h3>Flight Recorder</h3><button class="diag-close" onclick="closeDiagPanel()">&times;</button></div>
-    <div class="diag-tabs">
-      <button class="diag-tab active" onclick="showDiagTab(‘log’)">Event Log</button>
-      <button class="diag-tab" onclick="showDiagTab(‘state’)">SCORM State</button>
-      <button class="diag-tab" onclick="showDiagTab(‘suspend’)">Suspend Data</button>
-    </div>
-    <div id="diag-body"></div>
-    <div class="diag-actions">
-      <button class="diag-btn" onclick="copyDiagLog()">Copy Log</button>
-      <button class="diag-btn" onclick="refreshDiagPanel()">Refresh</button>
-    </div>
-  </div>
-</div>
-
-<div id="feedback-panel">
-  <div class="fp-header">Ask an Instructor</div>
-  <div class="fp-body">
-    <div class="fp-context" id="fp-context"></div>
-    <textarea id="fp-message" placeholder="What’s your question about this page?"></textarea>
-    <div class="fp-actions">
-      <button class="fp-btn" onclick="toggleFeedback()">Cancel</button>
-      <button class="fp-btn primary" id="fp-submit" onclick="submitFeedback()">Submit</button>
-    </div>
-    <div class="fp-status" id="fp-status"></div>
-  </div>
-</div>
-
-<script>
-${scormClientJs}
-</script>
-<script>
-${playerJs}</script>
-</body>
-</html>`;
+  return generateSharedPlayerHtml(courseData, JSON.stringify(courseData), manifest);
 }
 
 /**
@@ -446,14 +384,22 @@ ${playerJs}</script>
  * The CSS, scorm-client.js, and player.js are loaded from player/v1/ on S3.
  * Only the course data (JSON) is embedded inline.
  */
-function generateSharedPlayerHtml(courseData, courseDataJson) {
+function generateSharedPlayerHtml(courseData, courseDataJson, manifest) {
+  // Emit a <link>/<script> per asset NAMED BY THE MANIFEST — so the deployed asset set (incl. additions
+  // like aaa-presence.js) is reflected with zero edits here. Order follows the manifest's assets array
+  // (the player repo pins it: player.css, scorm-client.js, aaa-presence.js, player.js).
+  const base = String(manifest.base).replace(/\/$/, '');
+  const cssTags = manifest.assets.filter((a) => a.endsWith('.css'))
+    .map((a) => `<link rel="stylesheet" href="${base}/${a}">`).join('\n');
+  const jsTags = manifest.assets.filter((a) => a.endsWith('.js'))
+    .map((a) => `<script src="${base}/${a}"></script>`).join('\n');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${courseData.courseName}</title>
-<link rel="stylesheet" href="${S3_PLAYER_BASE}/player.css">
+${cssTags}
 </head>
 <body>
 <div id="sidebar">
@@ -524,8 +470,7 @@ function generateSharedPlayerHtml(courseData, courseDataJson) {
 </div>
 
 <script>var courseData = ${courseDataJson}; courseData.navigationLock = true;</script>
-<script src="${S3_PLAYER_BASE}/scorm-client.js"></script>
-<script src="${S3_PLAYER_BASE}/player.js"></script>
+${jsTags}
 </body>
 </html>`;
 }
@@ -703,7 +648,10 @@ async function buildPlayer(options) {
   );
   const mediaReport = await resolveAllMedia(courseData, ascentCookies);
 
-  const indexHtml = generateIndexHtml(courseData, { sharedPlayer: true });
+  // Resolve the central player from its deployed manifest (default = JavaScript / player/v1; pass
+  // options.playerImpl='vue' for player/v2). Throws loudly if the manifest is not deployed.
+  const playerManifest = await loadPlayerManifest(options.playerImpl);
+  const indexHtml = generateIndexHtml(courseData, playerManifest);
 
   // Ensure output directory exists
   fs.mkdirSync(outputDir, { recursive: true });
@@ -746,11 +694,6 @@ async function buildPlayer(options) {
     JSON.stringify(mediaReportArtifact, null, 2),
     'utf8'
   );
-
-  // Copy scorm-client.js alongside index.html for local preview
-  const scormClientSrc = path.join(__dirname, '..', '..', 'runtime', 'scorm-client.js');
-  const scormClientDest = path.join(outputDir, 'scorm-client.js');
-  fs.copyFileSync(scormClientSrc, scormClientDest);
 
   return { outputPath: outputPath, courseData: courseData, mediaReport: mediaReport };
 }
@@ -800,5 +743,6 @@ module.exports = {
   buildPlayer: buildPlayer,
   loadCourseData: loadCourseData,
   generateIndexHtml: generateIndexHtml,
+  loadPlayerManifest: loadPlayerManifest,
   formatIso8601Duration: formatIso8601Duration
 };
